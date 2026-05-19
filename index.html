@@ -328,6 +328,11 @@
                 </div>
             </div>
 
+            <div class="form-group">
+                <label>వాహన నంబర్ (Vehicle Number)</label>
+                <input type="text" id="pass-vehicle-number" placeholder="ఉదా: TS09AB1234" oninput="this.value = this.value.toUpperCase()" maxlength="15">
+            </div>
+
             <div id="pass-details" style="display:none; background:#f8fafc; padding:15px; border-radius:6px; border:1px solid #e2e8f0; margin-bottom:15px;">
                 <p style="margin:5px 0;"><strong>పేరు:</strong> <span id="pass-display-name">--</span></p>
                 <p style="margin:5px 0;"><strong>వాడిన మొత్తం:</strong> ₹<span id="pass-display-used">0.00</span></p>
@@ -348,9 +353,10 @@
                     </select>
                 </div>
                 
-                <div style="display:flex; gap:10px; margin-top:10px;">
-                    <button class="btn btn-green" style="margin-top:0;" onclick="rechargePass()">రీఛార్జ్ చేయి</button>
-                    <button class="btn btn-outline" style="margin-top:0; background:white; padding: 10px;" onclick="printPassReceipt()">🖨️ పాస్ రసీదు</button>
+                <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;">
+                    <button class="btn btn-green" style="margin-top:0; flex:1; min-width:100px;" onclick="rechargePass()">రీఛార్జ్ చేయి</button>
+                    <button class="btn btn-whatsapp" style="margin-top:0; flex:1; min-width:100px;" onclick="whatsappPassReceipt()">📱 వాట్సాప్</button>
+                    <button class="btn btn-outline" style="margin-top:0; flex:1; min-width:100px; background:white; padding: 10px;" onclick="printPassReceipt()">🖨️ ప్రింట్</button>
                 </div>
             </div>
 
@@ -1018,7 +1024,9 @@
 
             if (activeSessions) {
                 Object.values(activeSessions).forEach(session => {
-                    if(session && session.username !== currentShift.username && session.loginTime >= today) {
+                    // Include ALL active sessions (even those that logged in before midnight)
+                    // so overnight shifts don't get excluded from today's live dashboard totals.
+                    if(session && session.username !== currentShift.username) {
                         tHandled += (session.handled || 0);
                         tCash += parseFloat(session.cash || 0);
                         tOnline += parseFloat(session.online || 0);
@@ -1209,9 +1217,16 @@
                 document.getElementById('pass-display-name').innerText = escapeHTML(passes[id].name);
                 document.getElementById('pass-display-balance').innerText = parseFloat(passes[id].balance || 0).toFixed(2);
                 document.getElementById('pass-display-used').innerText = parseFloat(passes[id].used || 0).toFixed(2);
+                // Pre-fill vehicle number if saved
+                if (passes[id].vehicle) {
+                    document.getElementById('pass-vehicle-number').value = passes[id].vehicle;
+                } else {
+                    document.getElementById('pass-vehicle-number').value = '';
+                }
                 document.getElementById('pass-details').style.display = 'block';
                 document.getElementById('pass-register').style.display = 'none';
             } else {
+                document.getElementById('pass-vehicle-number').value = '';
                 document.getElementById('pass-details').style.display = 'none';
                 document.getElementById('pass-register').style.display = 'block';
             }
@@ -1223,7 +1238,8 @@
             if (!id || id.length < 10 || !name) return alert("దయచేసి కస్టమర్ పేరు మరియు సరైన 10 అంకెల ఫోన్ నంబర్ ఎంటర్ చేయండి.");
             
             if(!passes) passes = {};
-            passes[id] = { name: name, balance: 0, used: 0 };
+            const newVehicle = (document.getElementById('pass-vehicle-number').value || '').trim();
+            passes[id] = { name: name, balance: 0, used: 0, vehicle: newVehicle };
             
             pushToCloud();
             searchPass();
@@ -1241,6 +1257,10 @@
 
             passes[id].balance = parseFloat(passes[id].balance || 0) + amount;
 
+            // Save vehicle number if entered
+            const vehicleNo = (document.getElementById('pass-vehicle-number').value || '').trim();
+            if (vehicleNo) passes[id].vehicle = vehicleNo;
+
             if (method === 'CASH') {
                 currentShift.cash = parseFloat(currentShift.cash || 0) + amount;
                 globalStats.totalCash = parseFloat(globalStats.totalCash || 0) + amount;
@@ -1250,10 +1270,21 @@
             }
             
             saveSessionLocally();
-            pushToCloud();
+
+            // BUG FIX: Write directly to the specific pass node instead of pushToCloud()
+            // pushToCloud() triggers a full DB rewrite which can race against the real-time
+            // listener and overwrite the updated balance with stale data from V1/other tabs.
+            if (!isTester) {
+                firebase.database().ref('/passes/' + id).set(passes[id]).catch(e => console.error('Pass recharge sync error:', e));
+                firebase.database().ref('/globalStats').set(globalStats).catch(e => console.error(e));
+                if (currentShift.active && currentShift.role !== 'tester') {
+                    db.ref('/activeSessions/' + currentShift.username).set(currentShift).catch(e => console.error(e));
+                }
+            }
             
             document.getElementById('pass-recharge-amount').value = '';
-            searchPass(); 
+            searchPass();
+            updateLiveAdminDashboard();
             showToast(`₹${amount} బ్యాలెన్స్ యాడ్ చేయబడింది (${method === 'CASH' ? 'నగదు' : 'ఆన్‌లైన్'}).`);
         }
 
@@ -1262,6 +1293,7 @@
             if (!phone || !passes[phone]) return alert("దయచేసి సరైన పాస్‌ని ఎంచుకోండి.");
 
             const pass = passes[phone];
+            const vehicleNo = (document.getElementById('pass-vehicle-number').value || '').trim();
             document.body.className = 'print-mode-receipt';
             document.getElementById('receipt-type').innerText = 'మంత్లీ పాస్ రసీదు';
             
@@ -1269,15 +1301,47 @@
                 <div class="receipt-row"><span>తేదీ:</span> <span>${new Date().toLocaleString('te-IN')}</span></div>
                 <div class="receipt-row"><span>ఆపరేటర్:</span> <span>${escapeHTML(currentShift.name)}</span></div>
                 <div class="receipt-line"></div>
+                <div class="receipt-row"><span>పేరు:</span> <strong>${escapeHTML(passes[phone].name || '--')}</strong></div>
                 <div class="receipt-row"><span>ఫోన్ నంబర్:</span> <strong>${escapeHTML(phone)}</strong></div>
+                ${vehicleNo ? `<div class="receipt-row"><span>వాహన నంబర్:</span> <strong>${escapeHTML(vehicleNo)}</strong></div>` : ''}
                 <div class="receipt-line"></div>
                 <div class="receipt-row" style="font-size:16px;"><span>ప్రస్తుత బ్యాలెన్స్:</span> <strong>₹${parseFloat(pass.balance).toFixed(2)}</strong></div>
                 <div class="receipt-line"></div>
                 <div style="text-align:center; font-size:10px; margin-top:5px;">పార్కింగ్ చెక్-అవుట్ సమయంలో ఈ బ్యాలెన్స్ వాడబడుతుంది.</div>
+                <div class="receipt-line"></div>
+                <div style="font-size:9px; color:#333; margin-top:6px; line-height:1.5;">
+                    <div>⚠ విలువైన వాటి బాధ్యత వాహన యజమానికే ఉంటుంది.</div>
+                    <div>⚖ తర్కాలు గుంటూరు కోర్టులో పరిష్కరించబడతాయి.</div>
+                    <div>ℹ పాస్ బ్యాలెన్స్ రీఫండ్ చేయబడదు.</div>
+                </div>
             `;
             
             document.getElementById('receipt-body').innerHTML = printHTML;
             setTimeout(() => { window.print(); }, 500);
+        }
+
+        function whatsappPassReceipt() {
+            const phone = document.getElementById('pass-search-id').value.trim();
+            if (!phone || !passes[phone]) return alert("దయచేసి సరైన పాస్‌ని ఎంచుకోండి.");
+
+            const pass = passes[phone];
+            const vehicleNo = (document.getElementById('pass-vehicle-number').value || '').trim();
+            const dateStr = new Date().toLocaleString('te-IN');
+            const operatorName = escapeHTML(currentShift.name);
+
+            const msg = `*శ్రీ వెంకటేశ్వర పార్కింగ్*\n💳 *మంత్లీ పాస్ రసీదు*\n\n` +
+                `📅 తేదీ: ${dateStr}\n` +
+                `👤 పేరు: ${pass.name || '--'}\n` +
+                `📱 ఫోన్: ${phone}\n` +
+                (vehicleNo ? `🚘 వాహన నంబర్: ${vehicleNo}\n` : '') +
+                `\n💰 ప్రస్తుత బ్యాలెన్స్: ₹${parseFloat(pass.balance).toFixed(2)}\n` +
+                `👷 ఆపరేటర్: ${operatorName}\n\n` +
+                `_పార్కింగ్ చెక్-అవుట్ సమయంలో ఈ బ్యాలెన్స్ వాడబడుతుంది._\n\n` +
+                `⚠ విలువైన వాటి బాధ్యత వాహన యజమానికే ఉంటుంది.\n` +
+                `⚖ తర్కాలు గుంటూరు కోర్టులో పరిష్కరించబడతాయి.\n` +
+                `ℹ పాస్ బ్యాలెన్స్ రీఫండ్ చేయబడదు.`;
+
+            sendWhatsAppReceipt(phone, msg, null);
         }
 
         function reprintEntryReceipt() {
@@ -1454,6 +1518,11 @@
             
             saveSessionLocally();
 
+            // BUG FIX: Declare spotId and spotPhone HERE, before the receipt HTML is built,
+            // so spotPhone is available when rendering the pass balance line in the receipt.
+            const spotId = currentActiveSpot.id;
+            const spotPhone = currentActiveSpot.phone;
+
             document.body.className = 'print-mode-receipt';
             document.getElementById('receipt-type').innerText = 'ఫైనల్ బిల్లు';
 
@@ -1492,8 +1561,6 @@
 
             document.getElementById('receipt-body').innerHTML = printHTML;
 
-            const spotId = currentActiveSpot.id;
-            const spotPhone = currentActiveSpot.phone; // Save before clearing
             currentActiveSpot.isOccupied = false;
             currentActiveSpot.personName = '';
             currentActiveSpot.phone = ''; 
