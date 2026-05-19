@@ -1297,6 +1297,11 @@
                 <div class="receipt-row"><span>ఇన్ (In):</span> <span>${entryDateStr}</span></div>
                 <div class="receipt-line"></div>
                 <div style="text-align:center; font-size:11px; margin-top:5px; font-weight:bold;">బయటకు వెళ్లేటప్పుడు ఈ రసీదు చూపించండి</div>
+                <div class="receipt-line"></div>
+                <div style="font-size:9px; color:#333; margin-top:6px; line-height:1.5;">
+                    <div>⚠ విలువైన వాటి బాధ్యత యజమానికి ఉంటుంది.</div>
+                    <div>⚖ తర్కాలు గుంటూరు కోర్టులో పరిష్కరించబడతాయి.</div>
+                </div>
             `;
             document.getElementById('receipt-body').innerHTML = printHTML;
             setTimeout(() => { window.print(); }, 500);
@@ -1355,7 +1360,7 @@
             autoSaveToCustomerDB();
 
             const checkInTime = new Date().toLocaleTimeString('te-IN', {hour: '2-digit', minute:'2-digit'});
-            const msg = `*శ్రీ వెంకటేశ్వర పార్కింగ్*\n\n🚘 స్పాట్: #${currentActiveSpot.id}\n📋 బండి నంబర్: ${currentActiveSpot.plate}\n🕒 సమయం: ${checkInTime}\n👤 ఆపరేటర్: ${currentShift.name}\n\n_మా వద్ద పార్క్ చేసినందుకు ధన్యవాదాలు!_`;
+            const msg = `*శ్రీ వెంకటేశ్వర పార్కింగ్*\n\n🚘 స్పాట్: #${currentActiveSpot.id}\n📋 బండి నంబర్: ${currentActiveSpot.plate}\n🕒 సమయం: ${checkInTime}\n👤 ఆపరేటర్: ${currentShift.name}\n\n_మా వద్ద పార్క్ చేసినందుకు ధన్యవాదాలు!_\n\n⚠ విలువైన వాటి బాధ్యత యజమానికి ఉంటుంది.\n⚖ తర్కాలు గుంటూరు కోర్టులో పరిష్కరించబడతాయి.`;
 
             const entryDateStr = new Date(currentActiveSpot.entryTime).toLocaleString('te-IN');
             const receiptHTML = `
@@ -1367,6 +1372,11 @@
                 <div class="receipt-row"><span>ఇన్ (In):</span> <span>${entryDateStr}</span></div>
                 <div class="receipt-line"></div>
                 <div style="text-align:center; font-size:11px; margin-top:5px; font-weight:bold;">బయటకు వెళ్లేటప్పుడు ఈ రసీదు చూపించండి</div>
+                <div class="receipt-line"></div>
+                <div style="font-size:9px; color:#333; margin-top:6px; line-height:1.5;">
+                    <div>⚠ విలువైన వాటి బాధ్యత యజమానికి ఉంటుంది.</div>
+                    <div>⚖ తర్కాలు గుంటూరు కోర్టులో పరిష్కరించబడతాయి.</div>
+                </div>
             `;
 
             if (actionType === 'whatsapp_print') {
