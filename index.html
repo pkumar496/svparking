@@ -959,7 +959,7 @@
                 let id = (phone.length >= 10) ? phone : safePlate;
                 if (!customerDB) customerDB = {};
                 customerDB[id] = {
-                    name: phone || plate || '--',
+                    name: plate || '--',  // plate as identifier; phone stored separately
                     phone: phone || "--",
                     plate: plate || "--",
                     lastSeen: Date.now()
@@ -1024,9 +1024,10 @@
 
             if (activeSessions) {
                 Object.values(activeSessions).forEach(session => {
-                    // Include ALL active sessions (even those that logged in before midnight)
-                    // so overnight shifts don't get excluded from today's live dashboard totals.
-                    if(session && session.username !== currentShift.username) {
+                    // Only count other operators who logged in TODAY — a stale session from
+                    // 2+ days ago must not inflate today's totals (their data should be in shiftHistory).
+                    if(session && session.username !== currentShift.username &&
+                       (session.loginTime >= today || !session.loginTime)) {
                         tHandled += (session.handled || 0);
                         tCash += parseFloat(session.cash || 0);
                         tOnline += parseFloat(session.online || 0);
@@ -1473,6 +1474,25 @@
             if (!currentActiveSpot || !currentActiveSpot.isOccupied) return;
 
             const method = document.getElementById('input-payment-method').value;
+
+            // PASS: fetch live balance from Firebase before proceeding — another tab may have
+            // recharged or deducted since the last local sync, causing a stale-read overdraft.
+            if (method === 'PASS') {
+                const phone = currentActiveSpot.phone;
+                if (!phone) return alert("కస్టమర్ ఫోన్ నంబర్ లేదు! పాస్ వాడాలంటే ఫోన్ నంబర్ తప్పనిసరి.");
+                if (!passes || !passes[phone]) return alert("ఈ నంబర్‌కి పాస్/వాలెట్ లేదు! దయచేసి ముందుగా పాస్ క్రియేట్ చేయండి.");
+                db.ref('/passes/' + phone).once('value').then(snap => {
+                    const fresh = snap.val();
+                    if (fresh) passes[phone] = fresh;
+                    _doCheckout(method);
+                }).catch(() => { _doCheckout(method); });
+                return;
+            }
+            _doCheckout(method);
+        }
+
+        function _doCheckout(method) {
+            if (!currentActiveSpot || !currentActiveSpot.isOccupied) return;
             let cashReceived = 0; let changeDue = 0;
 
             if (method === 'PASS') {
@@ -1618,6 +1638,7 @@
             
             currentFeeCalculation = parseFloat(rawFee.toFixed(2));
 
+            document.getElementById('info-fee').style.display = 'block';
             document.getElementById('info-fee').innerText = `₹${currentFeeCalculation.toFixed(2)}`;
             document.getElementById('cash-due-display').innerText = `₹${currentFeeCalculation.toFixed(2)}`;
 
@@ -1950,7 +1971,7 @@
                 start = end;
             } else if (type === 'week') {
                 const d = new Date();
-                d.setDate(d.getDate() - d.getDay()); 
+                d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday-start (India)
                 start = getLocalDateString(d);
             } else if(type === 'month') {
                 const d = new Date();
@@ -1995,7 +2016,8 @@
                 let liveSessionsArray = [];
                 if (sessData) {
                     Object.values(sessData).forEach(s => {
-                        if (s && s.role !== 'tester') liveSessionsArray.push(s);
+                        // Exclude tester AND current user — current user re-added explicitly below.
+                        if (s && s.role !== 'tester' && s.username !== currentShift.username) liveSessionsArray.push(s);
                     });
                 }
 
@@ -2034,7 +2056,8 @@
                     addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, true, shift.loginTime);
                 });
 
-                // Also include current operator's live data if in range
+                // Current operator excluded from liveSessionsArray (Bug 6 fix) — re-add once here
+                // using local currentShift for the freshest figures.
                 if (currentShift && currentShift.active && currentShift.role !== 'tester') {
                     const refTime = currentShift.loginTime || Date.now();
                     if (refTime >= startTs && refTime <= endTs) {
