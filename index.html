@@ -791,7 +791,8 @@
         function sendWhatsAppReceipt(phone, messageText, afterCallback) {
             let cleanPhone = phone.replace(/\D/g, '');
             if (cleanPhone.length === 10) { cleanPhone = '91' + cleanPhone; }
-            if (cleanPhone.length < 10) {
+            // FIX 2: must be exactly 12 digits (91 + 10-digit number); reject anything else
+            if (cleanPhone.length !== 12) {
                 alert("దయచేసి సరైన 10 అంకెల ఫోన్ నంబర్‌ను ఎంటర్ చేయండి. వాట్సాప్ మెసేజ్ రద్దు చేయబడింది.");
                 return;
             }
@@ -911,6 +912,12 @@
                     updated++;
                 }
             });
+            // FIX 4: push updated entryTimes to Firebase so simulation is visible across tabs
+            if (!isTester) {
+                firebase.database().ref('/spots').set(spotsArray).catch(e => console.error(e));
+            } else {
+                firebase.database().ref('/spots').set(spotsArray).catch(e => console.error(e));
+            }
             renderGrid();
             showToast(`${hours} గంటలు ముందుకు వెళ్ళింది (${updated} వాహనాలు అప్‌డేట్ అయ్యాయి).`);
         }
@@ -959,7 +966,7 @@
                 let id = (phone.length >= 10) ? phone : safePlate;
                 if (!customerDB) customerDB = {};
                 customerDB[id] = {
-                    name: plate || '--',  // plate as identifier; phone stored separately
+                    name: phone || plate || '--', // FIX 3: use phone as name identifier, fall back to plate
                     phone: phone || "--",
                     plate: plate || "--",
                     lastSeen: Date.now()
@@ -1012,36 +1019,45 @@
             const today = new Date().setHours(0,0,0,0);
             let tHandled = 0; let tCash = 0; let tOnline = 0; let tPass = 0;
 
-            let historyArray = Array.isArray(shiftHistory) ? shiftHistory : Object.values(shiftHistory || {});
-            historyArray.forEach(shift => {
-                if(shift && shift.logoutTime >= today) {
-                    tHandled += (shift.handled || 0);
-                    tCash += parseFloat(shift.cash || 0);
-                    tOnline += parseFloat(shift.online || 0);
-                    tPass += parseFloat(shift.passUsage || 0);
-                }
-            });
+            // FIX 6: track which active session usernames we count, so a session that is BOTH
+            // in activeSessions AND lingering in shiftHistory is never double-counted.
+            const countedUsernames = new Set();
 
+            // Count active sessions first (live data is always fresher than history)
             if (activeSessions) {
                 Object.values(activeSessions).forEach(session => {
-                    // Only count other operators who logged in TODAY — a stale session from
-                    // 2+ days ago must not inflate today's totals (their data should be in shiftHistory).
                     if(session && session.username !== currentShift.username &&
                        (session.loginTime >= today || !session.loginTime)) {
                         tHandled += (session.handled || 0);
                         tCash += parseFloat(session.cash || 0);
                         tOnline += parseFloat(session.online || 0);
                         tPass += parseFloat(session.passUsage || 0);
+                        countedUsernames.add(session.username);
                     }
                 });
             }
 
+            // Count current operator (freshest local data)
             if (currentShift && currentShift.active && currentShift.role !== 'tester') {
                 tHandled += (currentShift.handled || 0);
                 tCash += parseFloat(currentShift.cash || 0);
                 tOnline += parseFloat(currentShift.online || 0);
                 tPass += parseFloat(currentShift.passUsage || 0);
+                countedUsernames.add(currentShift.username);
             }
+
+            // Count completed shifts from history — skip any username already counted above
+            let historyArray = Array.isArray(shiftHistory) ? shiftHistory : Object.values(shiftHistory || {});
+            historyArray.forEach(shift => {
+                if(shift && shift.logoutTime >= today) {
+                    // Skip if this operator is currently live (already counted above)
+                    if (shift.username && countedUsernames.has(shift.username)) return;
+                    tHandled += (shift.handled || 0);
+                    tCash += parseFloat(shift.cash || 0);
+                    tOnline += parseFloat(shift.online || 0);
+                    tPass += parseFloat(shift.passUsage || 0);
+                }
+            });
 
             return { tHandled, tCash, tOnline, tPass };
         }
@@ -1204,6 +1220,7 @@
             document.getElementById('pass-search-id').value = '';
             document.getElementById('pass-recharge-amount').value = '';
             document.getElementById('pass-new-name').value = '';
+            document.getElementById('pass-vehicle-number').value = ''; // FIX 1: clear vehicle field on open
             
             document.getElementById('pass-details').style.display = 'none';
             document.getElementById('pass-register').style.display = 'none';
@@ -1242,7 +1259,11 @@
             const newVehicle = (document.getElementById('pass-vehicle-number').value || '').trim();
             passes[id] = { name: name, balance: 0, used: 0, vehicle: newVehicle };
             
-            pushToCloud();
+            // FIX 5: targeted write instead of pushToCloud() — avoids race condition overwriting
+            // fresh Firebase data with stale local state (same fix applied to rechargePass).
+            if (!isTester) {
+                firebase.database().ref('/passes/' + id).set(passes[id]).catch(e => console.error('New pass sync error:', e));
+            }
             searchPass();
             showToast("కొత్త పాస్ అకౌంట్ క్రియేట్ చేయబడింది.");
         }
