@@ -2022,11 +2022,25 @@
                 }
 
                 // --- Aggregate by operator-shift ---
-                // dayMap: { "YYYY-MM-DD": { operatorName: { handled, cash, online, pass, isLive, loginTime } } }
+                // dayMap: { "YYYY-MM-DD": { displayKey: { handled, cash, online, pass, isLive, loginTime } } }
+                // seenLoginTimes: tracks loginTime of every session added — prevents the same shift
+                // from being counted twice when it exists in both shiftHistory and activeSessions
+                // (e.g. during logout race or admin sessions that write to both paths).
                 const dayMap = {};
+                const seenLoginTimes = new Set();
 
                 function addToDay(dateStr, name, h, c, o, p, isLive, loginTime) {
+                    // De-duplicate by loginTime: each unique login session counted only once.
+                    // Live sessions take priority over history entries for the same loginTime
+                    // (they have fresher figures), so live entries are processed first.
+                    const loginKey = loginTime ? String(loginTime) : null;
+                    if (loginKey) {
+                        if (seenLoginTimes.has(loginKey)) return; // already counted — skip
+                        seenLoginTimes.add(loginKey);
+                    }
+
                     if (!dayMap[dateStr]) dayMap[dateStr] = {};
+                    // Display key uses name + live indicator so the row looks correct in the table.
                     const key = name + (isLive ? ' 🟢' : '');
                     if (!dayMap[dateStr][key]) {
                         dayMap[dateStr][key] = { handled:0, cash:0, online:0, pass:0, isLive, loginTime };
@@ -2037,16 +2051,8 @@
                     dayMap[dateStr][key].pass    += parseFloat(p || 0);
                 }
 
-                // Process completed shifts
-                historyArray.forEach(shift => {
-                    if (!shift || !shift.logoutTime) return;
-                    if (shift.logoutTime < startTs || shift.logoutTime > endTs) return;
-                    const d = new Date(shift.logoutTime);
-                    const dateStr = getLocalDateString(d);
-                    addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, false, shift.loginTime);
-                });
-
-                // Process live / active shifts
+                // Process live / active shifts FIRST so their loginTime is registered in
+                // seenLoginTimes before history is processed — live data is always fresher.
                 liveSessionsArray.forEach(shift => {
                     if (!shift) return;
                     const refTime = shift.loginTime || Date.now();
@@ -2065,6 +2071,16 @@
                         addToDay(dateStr, currentShift.name || 'Unknown', currentShift.handled, currentShift.cash, currentShift.online, currentShift.passUsage, true, currentShift.loginTime);
                     }
                 }
+
+                // Process completed shifts AFTER live — any shift whose loginTime was already
+                // registered above (live/current) will be silently skipped, eliminating double-count.
+                historyArray.forEach(shift => {
+                    if (!shift || !shift.logoutTime) return;
+                    if (shift.logoutTime < startTs || shift.logoutTime > endTs) return;
+                    const d = new Date(shift.logoutTime);
+                    const dateStr = getLocalDateString(d);
+                    addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, false, shift.loginTime);
+                });
 
                 // --- Build totals and render table ---
                 let totalHandled = 0, totalCash = 0, totalOnline = 0, totalPass = 0;
