@@ -700,6 +700,7 @@
         
         let currentShift = { active: false, username: "", name: "", role: "", loginTime: null, logoutTime: null, handled: 0, cash: 0, online: 0, passUsage: 0 };
         let logoutInProgress = false; // FIX Bug 2: Prevent double-logout double-push
+        let checkoutInProgress = false; // BUG A FIX: Guard realtime listener from clobbering globalStats mid-checkout
         
         // FIX Bug 4 & 5: Validate restored localStorage session against Firebase activeSessions.
         // Also use getLocalDateString() instead of toDateString() to avoid timezone mismatch.
@@ -880,10 +881,22 @@
                         if(!spots[i]) spots[i] = { id: i + 1, isOccupied: false, plate: '', personName: '', phone: '', type: null, entryTime: null, hasPass: false };
                     }
                 } 
-                if(data.globalStats) globalStats = data.globalStats;
+                // BUG A FIX: Never let the realtime listener overwrite globalStats/passes
+                // while a checkout is mid-flight. _doCheckout fetches its own fresh copy.
+                if(data.globalStats && !checkoutInProgress) globalStats = data.globalStats;
                 if(data.shiftHistory) shiftHistory = data.shiftHistory;
                 if(data.activeSessions) activeSessions = data.activeSessions; else activeSessions = {};
-                if(data.passes) passes = data.passes; else passes = {};
+                // BUG A FIX: Sync currentShift from server if another tab of same operator
+                // has newer data (more handled count), but never during a checkout.
+                if(data.activeSessions && currentShift.active && currentShift.username &&
+                   data.activeSessions[currentShift.username] && !checkoutInProgress) {
+                    const serverShift = data.activeSessions[currentShift.username];
+                    if (serverShift.handled > (currentShift.handled || 0)) {
+                        currentShift = Object.assign({}, serverShift, { active: true });
+                        saveSessionLocally();
+                    }
+                }
+                if(data.passes && !checkoutInProgress) passes = data.passes; else if(!data.passes) passes = {};
                 if(data.customerDB) customerDB = data.customerDB; else customerDB = {};
             } else if (!isTester) {
                 pushToCloud(); 
@@ -915,7 +928,9 @@
         }); // end restoreSessionFromLocalStorage().then()
 
         function pushToCloud() {
-            if(isTester) return; 
+            if(isTester) return;
+            // BUG F FIX: Never push globalStats while a checkout is writing it
+            if(checkoutInProgress) { console.warn("pushToCloud skipped: checkout in progress"); return; }
             
             let cleanSpots = Array.isArray(spots) ? spots : Object.values(spots || {});
 
@@ -1438,8 +1453,12 @@
             setTimeout(() => { window.print(); }, 500);
         }
 
+        let checkinInProgress = false; // BUG B FIX: double-tap guard for check-in
         function submitCheckin(actionType) {
             if (!currentActiveSpot || currentActiveSpot.isOccupied) return;
+            // BUG B FIX: Prevent double-tap on mobile triggering two check-ins
+            if (checkinInProgress) return;
+            checkinInProgress = true;
 
             const plate = document.getElementById('input-plate').value.trim();
             const phone = document.getElementById('input-phone').value.trim();
@@ -1510,6 +1529,7 @@
             renderGrid();
             updateLiveAdminDashboard();
             closeModals();
+            checkinInProgress = false; // BUG B FIX: reset guard
         }
 
         function submitCheckout(btnElement) {
@@ -1545,6 +1565,10 @@
             }
             let cashReceived = 0; let changeDue = 0;
 
+            // BUG C FIX: Set flag so realtime listener does not overwrite globalStats
+            // or passes while we are in the middle of fetching + mutating them.
+            checkoutInProgress = true;
+
             // FIX Bug 3: Always re-read globalStats from Firebase before mutating.
             // If the page was reloaded mid-shift (crash/refresh), the in-memory globalStats
             // was reset to defaults and then restored from Firebase via the on('value') listener.
@@ -1565,6 +1589,7 @@
                 let currentBal = parseFloat(passes[phone].balance || 0);
                 if (currentBal < currentFeeCalculation && currentFeeCalculation > 0) {
                     if (btnElement) btnElement.disabled = false;
+                    checkoutInProgress = false; // BUG C FIX: release on early exit
                     return alert(`పాస్ బ్యాలెన్స్ సరిపోదు!\n\nబ్యాలెన్స్: ₹${currentBal.toFixed(2)}\nరుసుము: ₹${currentFeeCalculation.toFixed(2)}`);
                 }
                 
@@ -1584,10 +1609,12 @@
                     }
                     if (cashReceived < 0) {
                         if (btnElement) btnElement.disabled = false;
+                        checkoutInProgress = false; // BUG C FIX
                         return alert("నగదు మైనస్‌లో ఉండకూడదు.");
                     }
                     if (cashReceived < currentFeeCalculation && currentFeeCalculation > 0) {
                         if (btnElement) btnElement.disabled = false;
+                        checkoutInProgress = false; // BUG C FIX
                         return alert(`సరిపోని నగదు! రుసుము ₹${currentFeeCalculation}`);
                     }
                     changeDue = cashReceived - currentFeeCalculation;
@@ -1669,6 +1696,7 @@
             renderGrid();
             updateLiveAdminDashboard();
             closeModals();
+            checkoutInProgress = false; // BUG C FIX: release the guard
             
             showToast(`స్పాట్ #${spotId} చెక్-అవుట్ చేయబడింది. రుసుము: ₹${currentFeeCalculation.toFixed(2)}`, false);
             
@@ -1836,6 +1864,12 @@
                     let cleanSpots = Array.isArray(spots) ? spots : Object.values(spots || {});
 
                     // FIX: Zombie History Prevention. Remove shiftHistory from the full update block.
+                    // BUG E FIX: Re-read globalStats from Firebase right before the logout write
+                    // to avoid overwriting concurrent updates from other operators.
+                    try {
+                        const latestStatsSnap = await db.ref('/globalStats').once('value');
+                        if (latestStatsSnap.exists()) globalStats = latestStatsSnap.val();
+                    } catch(e) { console.warn('Could not refresh globalStats at logout', e); }
                     await db.ref('/').update({ 
                         settings: systemSettings || {}, 
                         spots: cleanSpots, 
@@ -2098,11 +2132,15 @@
                 const dayMap = {};
                 const seenLoginTimes = new Set();
 
-                function addToDay(dateStr, name, h, c, o, p, isLive, loginTime) {
-                    // FIX: Deduplication Bypass patched by forcing a fallback key.
-                    const loginKey = loginTime ? String(loginTime) : `${name}_${c}_${o}`; 
-                    
-                    if (seenLoginTimes.has(loginKey)) return; 
+                function addToDay(dateStr, name, h, c, o, p, isLive, loginTime, username) {
+                    // BUG D FIX: Use username+loginTime as dedup key so two different
+                    // operators logging in at the same millisecond are never collapsed.
+                    // Fallback includes handled+cash+online so two zero-value shifts from
+                    // same operator on same day are not incorrectly merged.
+                    const loginKey = loginTime
+                        ? `${username || name}_${loginTime}`
+                        : `${username || name}_${h}_${c}_${o}_${p}`;
+                    if (seenLoginTimes.has(loginKey)) return;
                     seenLoginTimes.add(loginKey);
 
                     if (!dayMap[dateStr]) dayMap[dateStr] = {};
@@ -2124,14 +2162,14 @@
                     if (refTime < startTs || refTime > endTs) return;
                     const d = new Date(refTime);
                     const dateStr = getLocalDateString(d);
-                    addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, true, shift.loginTime);
+                    addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, true, shift.loginTime, shift.username);
                 });
 
                 if (currentShift && currentShift.active && currentShift.role !== 'tester') {
                     const refTime = currentShift.loginTime || Date.now();
                     if (refTime >= startTs && refTime <= endTs) {
                         const dateStr = getLocalDateString(new Date(refTime));
-                        addToDay(dateStr, currentShift.name || 'Unknown', currentShift.handled, currentShift.cash, currentShift.online, currentShift.passUsage, true, currentShift.loginTime);
+                        addToDay(dateStr, currentShift.name || 'Unknown', currentShift.handled, currentShift.cash, currentShift.online, currentShift.passUsage, true, currentShift.loginTime, currentShift.username);
                     }
                 }
 
@@ -2141,7 +2179,7 @@
                     if (refTime < startTs || refTime > endTs) return;
                     const d = new Date(refTime);
                     const dateStr = getLocalDateString(d);
-                    addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, false, shift.loginTime);
+                    addToDay(dateStr, shift.name || 'Unknown', shift.handled, shift.cash, shift.online, shift.passUsage, false, shift.loginTime, shift.username);
                 });
 
                 let totalHandled = 0, totalCash = 0, totalOnline = 0, totalPass = 0;
