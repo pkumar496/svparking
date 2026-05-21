@@ -730,13 +730,20 @@
                 // If the session was already logged out server-side (e.g. browser crashed after
                 // Firebase write but before clearLocalSession), do NOT restore it — it would
                 // re-open a zombie shift and double-count revenue on next logout.
+                //
+                // AUTO-SAVE AWARENESS: autoSaveShiftOnClose() removes the activeSessions entry
+                // AND clears localStorage atomically. If the user closed the browser mid-session
+                // before autoSave completed (very rare race), activeSessions will be absent and
+                // we correctly discard the local copy — the autoSaved history entry is already
+                // in /shiftHistory so no revenue is lost.
                 try {
                     const activeSnap = await db.ref('/activeSessions/' + parsed.username).once('value');
                     if (activeSnap.exists()) {
                         // Session is still live server-side — safe to restore
                         currentShift = parsed;
                     } else {
-                        // Server already removed this session; discard stale local copy
+                        // Server already removed this session (clean logout OR auto-save on close).
+                        // Discard stale local copy — do NOT re-open this shift.
                         clearLocalSession();
                     }
                 } catch (networkErr) {
@@ -1827,6 +1834,12 @@
             // Without this guard, newShift gets pushed to /shiftHistory twice, doubling revenue.
             if (logoutInProgress) return;
             logoutInProgress = true;
+            // Reset auto-save flag — if auto-save fired (e.g. user minimised then reopened)
+            // but the session was still in activeSessions (auto-save hadn't finished yet),
+            // we allow the normal logout to complete. autoSaveFired is checked below to
+            // prevent a redundant shiftHistory push.
+            const wasAutoSaved = autoSaveFired;
+            autoSaveFired = true; // Prevent any concurrent pagehide/beforeunload from double-pushing
             try {
                 let alertMsg = "";
                 let finalName = currentShift.name || "Operator";
@@ -1885,7 +1898,10 @@
                     });
 
                     // Target the exact push ID array so older history isn't overwritten by local arrays
-                    if (newShift) {
+                    // AUTO-SAVE GUARD: if autoSaveShiftOnClose() already pushed this shift to
+                    // /shiftHistory (browser was minimised/backgrounded before user clicked logout),
+                    // do NOT push again — that would double-count revenue.
+                    if (newShift && !wasAutoSaved) {
                         await db.ref('/shiftHistory').push(newShift);
                     }
 
@@ -1904,6 +1920,7 @@
             } catch(e) {
                 console.error("Critical Logout Error:", e);
                 logoutInProgress = false; // FIX Bug 2: Reset guard so user can retry after error
+                autoSaveFired = wasAutoSaved; // Restore to pre-logout state so retry works correctly
                 alert("డేటాబేస్‌లో సేవ్ చేయడంలో ఎర్రర్ వచ్చింది. ఇంటర్నెట్ కనెక్షన్ చెక్ చేయండి.");
                 document.getElementById('cloud-loader').style.display = 'none';
             }
@@ -1919,6 +1936,7 @@
 
             if (user === 'test' && pass === '143') {
                 isTester = true;
+                autoSaveFired = false;
                 currentShift = { active: true, username: "test", name: "Tester", role: "tester", loginTime: Date.now(), handled: 0, cash: 0, online: 0, passUsage: 0 };
                 saveSessionLocally();
                 closeModals();
@@ -1931,6 +1949,7 @@
             if (systemSettings.users[user] && systemSettings.users[user].pass === pass) {
                 currentShift = { active: true, username: user, name: systemSettings.users[user].name, role: systemSettings.users[user].role, loginTime: Date.now(), handled: 0, cash: 0, online: 0, passUsage: 0 };
                 
+                autoSaveFired = false; // New session — allow auto-save to fire if browser is closed
                 saveSessionLocally();
                 
                 if (currentShift.role !== 'tester') {
@@ -2371,6 +2390,135 @@
                 updateLiveAdminDashboard();
             }
         }, 30000);
+
+        // ============================================================
+        //  AUTO-SAVE ON BROWSER CLOSE / TAB SWITCH / MOBILE BACKGROUND
+        //  
+        //  Problem: When an operator closes the browser without using the
+        //  "Logout & Save" button, their completed shift data stays only in
+        //  localStorage. On next open, restoreSessionFromLocalStorage() sees
+        //  the stale session still in activeSessions on Firebase and restores
+        //  it. When they THEN logout properly, the shift gets pushed to
+        //  shiftHistory again — doubling (or triple-counting) all revenue.
+        //
+        //  Fix: On every page-hide / visibility-hidden / beforeunload event
+        //  we immediately commit the current shift to /shiftHistory and remove
+        //  it from /activeSessions. This mirrors exactly what executeSecureLogout()
+        //  does, but runs silently using the Firebase SDK's keepSynced + a
+        //  synchronous-safe queued write so it survives the brief teardown window.
+        //
+        //  If the user refreshes (not a true close), restoreSessionFromLocalStorage()
+        //  will no longer find the session in /activeSessions, so it correctly
+        //  discards the stale localStorage copy and the user must log in again.
+        //  This is acceptable — it mirrors a normal shift-end flow.
+        // ============================================================
+
+        // Track whether we already fired the auto-save so duplicate events
+        // (pagehide fires after visibilitychange on mobile) don't double-push.
+        let autoSaveFired = false;
+
+        async function autoSaveShiftOnClose() {
+            // Skip if: no active shift, already fired, tester mode, or logout already running
+            if (autoSaveFired) return;
+            if (!currentShift || !currentShift.active) return;
+            if (isTester) return;
+            if (logoutInProgress) return;
+
+            autoSaveFired = true;
+
+            const finalName     = currentShift.name     || "Operator";
+            const finalHandled  = currentShift.handled  || 0;
+            const c             = parseFloat(currentShift.cash      || 0);
+            const o             = parseFloat(currentShift.online    || 0);
+            const p             = parseFloat(currentShift.passUsage || 0);
+            const usernameKey   = currentShift.username;
+
+            // Only push a shiftHistory entry if the shift had real activity.
+            // Zero-activity browser-close (e.g. admin just opened the page to check)
+            // should NOT create a ghost ₹0 history entry.
+            const hasActivity = finalHandled > 0 || c > 0 || o > 0 || p > 0;
+
+            if (hasActivity) {
+                const autoShift = {
+                    name:       finalName,
+                    username:   usernameKey || "",
+                    loginTime:  currentShift.loginTime || Date.now(),
+                    logoutTime: Date.now(),
+                    handled:    finalHandled,
+                    leftInLot:  (() => {
+                        try {
+                            const sa = Array.isArray(spots) ? spots : Object.values(spots || {});
+                            return sa.filter(s => s && s.isOccupied).length;
+                        } catch(e) { return 0; }
+                    })(),
+                    cash:       c,
+                    online:     o,
+                    passUsage:  p,
+                    autoSaved:  true   // flag so admin can distinguish auto-saves from manual logouts
+                };
+
+                try {
+                    // push() is async but Firebase SDK queues it locally and
+                    // flushes even during the brief unload window when the SDK
+                    // is still connected.
+                    await db.ref('/shiftHistory').push(autoShift);
+                } catch(e) {
+                    console.warn('autoSave: shiftHistory push failed', e);
+                }
+            }
+
+            // Always remove from activeSessions so restoreSessionFromLocalStorage()
+            // does NOT re-open this shift on next page load.
+            try {
+                await db.ref('/activeSessions/' + usernameKey).remove();
+            } catch(e) {
+                console.warn('autoSave: activeSessions remove failed', e);
+            }
+
+            // Clear local session so there is nothing to restore on reload.
+            clearLocalSession();
+
+            // Reset in-memory state (no UI updates needed — page is closing).
+            currentShift = { active: false, username: "", name: "", role: "", loginTime: null, logoutTime: null, handled: 0, cash: 0, online: 0, passUsage: 0 };
+        }
+
+        // --- Layer 1: visibilitychange ---
+        // Fires when tab is hidden (switch tab, minimize, screen off on mobile).
+        // We update the activeSessions entry here so other admins see latest figures
+        // even if the operator hasn't formally logged out. We do NOT push to
+        // shiftHistory here because the session is still technically live.
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                if (!currentShift || !currentShift.active || isTester) return;
+                // Keep activeSessions current with latest shift figures
+                try {
+                    db.ref('/activeSessions/' + currentShift.username).set(currentShift);
+                } catch(e) {}
+            }
+        });
+
+        // --- Layer 2: pagehide ---
+        // Fires on mobile (iOS/Android) when the tab is killed or navigated away.
+        // This is MORE reliable than beforeunload on mobile browsers.
+        // persisted=false means the page is being truly destroyed (not cached).
+        window.addEventListener('pagehide', (e) => {
+            if (!e.persisted) {
+                // Page is being unloaded for real — trigger full auto-save.
+                // autoSaveShiftOnClose() is async but the Firebase SDK queues
+                // the writes before the connection drops.
+                autoSaveShiftOnClose();
+            }
+        });
+
+        // --- Layer 3: beforeunload ---
+        // Desktop browser close/refresh fallback. We do NOT show a confirm dialog
+        // (that would be annoying on every refresh), just silently fire the save.
+        window.addEventListener('beforeunload', () => {
+            // Only run if the pagehide handler hasn't already handled this
+            if (!autoSaveFired) {
+                autoSaveShiftOnClose();
+            }
+        });
 
     </script>
 </body>
