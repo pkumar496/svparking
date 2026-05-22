@@ -1015,8 +1015,10 @@
             const typeEl = document.getElementById('input-type');
             const vehicleType = typeEl ? typeEl.value : null;
 
-            if (phone.length >= 10 || safePlate) {
-                let id = (phone.length >= 10) ? phone : safePlate;
+            // Normalize to 10-digit key (strip leading country code 91 if present)
+            const normPhone = phone.length === 12 && phone.startsWith('91') ? phone.slice(2) : phone;
+            if (normPhone.length >= 10 || safePlate) {
+                let id = (normPhone.length >= 10) ? normPhone : safePlate;
                 if (!customerDB) customerDB = {};
                 const existing = customerDB[id] || {};
                 customerDB[id] = {
@@ -1692,10 +1694,16 @@
             document.getElementById('receipt-body').innerHTML = printHTML;
 
             // Update customerDB checkOut time for this vehicle
-            if (spotPhone && customerDB && customerDB[spotPhone]) {
-                customerDB[spotPhone].checkOut = Date.now();
+            // Normalize spotPhone to 10-digit key (strip leading 91 if present)
+            const normSpotPhone = spotPhone && spotPhone.length === 12 && spotPhone.startsWith('91') ? spotPhone.slice(2) : (spotPhone || '');
+            const spotPlate = (currentActiveSpot.plate || '').toUpperCase().replace(/[.#$\[\]]/g, '');
+            const dbKey = (normSpotPhone && customerDB && customerDB[normSpotPhone])
+                ? normSpotPhone
+                : (spotPlate && customerDB && customerDB[spotPlate] ? spotPlate : null);
+            if (dbKey && customerDB && customerDB[dbKey]) {
+                customerDB[dbKey].checkOut = Date.now();
                 if (!isTester) {
-                    firebase.database().ref('/customerDB/' + spotPhone).update({ checkOut: Date.now() }).catch(e => console.error(e));
+                    firebase.database().ref('/customerDB/' + dbKey).update({ checkOut: Date.now() }).catch(e => console.error(e));
                 }
             }
 
