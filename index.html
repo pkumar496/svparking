@@ -509,16 +509,16 @@
             <h2 style="color: var(--admin-color)">👥 కస్టమర్ డేటాబేస్ డైరెక్టరీ</h2>
             <p style="font-size: 12px; color: #555; margin-top: 0;">సిస్టమ్‌లో ఒకసారి ఎంటర్ చేసిన నంబర్లు అన్నీ ఇక్కడ ఆటోమేటిక్‌గా సేవ్ అవుతాయి.</p>
             
-            <input type="text" class="customer-search" id="customer-search-input" placeholder="పేరు లేదా నంబర్‌తో వెతకండి..." onkeyup="filterCustomerDB()">
+            <input type="text" class="customer-search" id="customer-search-input" placeholder="బండి నంబర్‌తో వెతకండి..." onkeyup="filterCustomerDB()">
             
             <div style="max-height: 300px; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 15px;">
                 <table class="customer-table">
                     <thead>
                         <tr>
-                            <th>కస్టమర్ పేరు</th>
-                            <th>ఫోన్ నంబర్</th>
                             <th>బండి నంబర్</th>
-                            <th>చివరి ఎంట్రీ</th>
+                            <th>వాహన రకం</th>
+                            <th>చెక్-ఇన్ సమయం</th>
+                            <th>చెక్-అవుట్ సమయం</th>
                         </tr>
                     </thead>
                     <tbody id="customer-db-body">
@@ -1012,15 +1012,18 @@
             const phone = document.getElementById('input-phone').value.trim().replace(/\D/g, '');
             let plate = document.getElementById('input-plate').value.trim().toUpperCase();
             const safePlate = plate.replace(/[.#$\[\]]/g, '');
+            const typeEl = document.getElementById('input-type');
+            const vehicleType = typeEl ? typeEl.value : null;
 
             if (phone.length >= 10 || safePlate) {
                 let id = (phone.length >= 10) ? phone : safePlate;
                 if (!customerDB) customerDB = {};
+                const existing = customerDB[id] || {};
                 customerDB[id] = {
-                    name: phone || plate || '--',
-                    phone: phone || "--",
-                    plate: plate || "--",
-                    lastSeen: Date.now()
+                    plate: plate || existing.plate || "--",
+                    vehicleType: vehicleType || existing.vehicleType || null,
+                    checkIn: existing.checkIn || Date.now(),
+                    checkOut: existing.checkOut || null
                 };
                 if (!isTester) {
                     firebase.database().ref('/customerDB/' + id).set(customerDB[id]).catch(e => console.error(e));
@@ -1045,21 +1048,23 @@
                 return;
             }
 
-            let sortedCustomers = Object.values(customerDB).sort((a,b) => b.lastSeen - a.lastSeen);
+            const typeLabels = { "2": "🚲 సైకిల్", "3": "🏍️ బైక్", "4": "🛺 ఆటో", "5": "🚗 కారు" };
+
+            let sortedCustomers = Object.values(customerDB).sort((a,b) => (b.checkIn || b.lastSeen || 0) - (a.checkIn || a.lastSeen || 0));
 
             sortedCustomers.forEach(cust => {
                 if (!cust) return;
-                const custName = (cust.name || '').toLowerCase();
-                const custPhone = (cust.phone || '');
                 const custPlate = (cust.plate || '').toLowerCase();
-                if (custName.includes(query) || custPhone.includes(query) || custPlate.includes(query)) {
-                    let dateStr = cust.lastSeen ? new Date(cust.lastSeen).toLocaleDateString('te-IN') : '--';
+                if (custPlate.includes(query) || !query) {
+                    let checkInStr = (cust.checkIn || cust.lastSeen) ? new Date(cust.checkIn || cust.lastSeen).toLocaleString('te-IN') : '--';
+                    let checkOutStr = cust.checkOut ? new Date(cust.checkOut).toLocaleString('te-IN') : '--';
+                    let typeStr = cust.vehicleType ? (typeLabels[cust.vehicleType] || cust.vehicleType) : '--';
                     tbody.innerHTML += `
                         <tr>
-                            <td><strong>${escapeHTML(cust.name)}</strong></td>
-                            <td>${escapeHTML(cust.phone)}</td>
-                            <td>${escapeHTML(cust.plate)}</td>
-                            <td>${dateStr}</td>
+                            <td><strong>${escapeHTML(cust.plate || '--')}</strong></td>
+                            <td>${typeStr}</td>
+                            <td>${checkInStr}</td>
+                            <td>${checkOutStr}</td>
                         </tr>
                     `;
                 }
@@ -1102,7 +1107,11 @@
             historyArray.forEach(shift => {
                 if (!shift) return;
                 const lt = shift.loginTime;
-                if (!lt || lt < todayStart || lt > todayEnd) return;
+                const lo = shift.logoutTime;
+                // Count shift if it logged out today (captures overnight vehicles checked out this morning)
+                // OR if it logged in today (same-day shifts). Use logoutTime as primary signal for revenue.
+                const refTime = (lo && lo >= todayStart && lo <= todayEnd) ? lo : lt;
+                if (!refTime || refTime < todayStart || refTime > todayEnd) return;
                 if (seenLoginTimes.has(String(lt))) return;
                 seenLoginTimes.add(String(lt));
                 tHandled += (shift.handled || 0);
@@ -1681,6 +1690,14 @@
             }
 
             document.getElementById('receipt-body').innerHTML = printHTML;
+
+            // Update customerDB checkOut time for this vehicle
+            if (spotPhone && customerDB && customerDB[spotPhone]) {
+                customerDB[spotPhone].checkOut = Date.now();
+                if (!isTester) {
+                    firebase.database().ref('/customerDB/' + spotPhone).update({ checkOut: Date.now() }).catch(e => console.error(e));
+                }
+            }
 
             currentActiveSpot.isOccupied = false;
             currentActiveSpot.personName = '';
