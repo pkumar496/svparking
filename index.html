@@ -549,12 +549,12 @@
             <div class="admin-section">
                 <h3>💰 పార్కింగ్ ధరల సెట్టింగ్స్</h3>
                 <p style="font-size:12px; color:#555; margin-top:0;">
-                   <b>బైక్:</b> మొదటి 24 గంటలకు ఫ్లాట్ ధర పడుతుంది. ఆ తర్వాత ప్రతి 24 గంటలకూ అదే ఫీజు యాడ్ అవుతూ ఉంటుంది.<br><b>ఆటో, కారు:</b> మొదటి 12 గంటలకు ఫ్లాట్ ధర పడుతుంది. ఆ తర్వాత ప్రతి 12 గంటలకూ అదే ఫీజు యాడ్ అవుతూ ఉంటుంది.<br>
+                   <b>బైక్:</b> మొదటి 12 గంటలకు ఫ్లాట్ ధర పడుతుంది. ఆ తర్వాత ప్రతి 12 గంటలకూ అదే ఫీజు యాడ్ అవుతూ ఉంటుంది.<br><b>ఆటో, కారు:</b> మొదటి 12 గంటలకు ఫ్లాట్ ధర పడుతుంది. ఆ తర్వాత ప్రతి 12 గంటలకూ అదే ఫీజు యాడ్ అవుతూ ఉంటుంది.<br>
                    <b>సైకిల్:</b> ప్రతి 24 గంటలకు ఒక బ్లాక్.
                 </p>
                 <div style="display:flex; gap:10px; margin-bottom:10px; flex-wrap: wrap;">
                     <div class="form-group" style="flex:1; min-width: 80px;"><label>సైకిల్ (ప్రతి 24గం. కు ₹)</label><input type="number" id="rate-2" min="0" step="1"></div>
-                    <div class="form-group" style="flex:1; min-width: 80px;"><label>బైక్ (ప్రతి 24గం. కు ₹)</label><input type="number" id="rate-3" min="0" step="1"></div>
+                    <div class="form-group" style="flex:1; min-width: 80px;"><label>బైక్ (ప్రతి 12గం. కు ₹)</label><input type="number" id="rate-3" min="0" step="1"></div>
                     <div class="form-group" style="flex:1; min-width: 80px;"><label>ఆటో (ప్రతి 12గం. కు ₹)</label><input type="number" id="rate-4" min="0" step="1"></div>
                     <div class="form-group" style="flex:1; min-width: 80px;"><label>కారు (ప్రతి 12గం. కు ₹)</label><input type="number" id="rate-5" min="0" step="1"></div>
                     <div class="form-group" style="flex:1; min-width: 80px;"><label>పాస్ డిస్కౌంట్ (%)</label><input type="number" id="admin-pass-discount" min="0" max="100" step="1"></div>
@@ -2441,6 +2441,7 @@
         // Track whether we already fired the auto-save so duplicate events
         // (pagehide fires after visibilitychange on mobile) don't double-push.
         let autoSaveFired = false;
+        let pageHiddenAt = null; // timestamp when page went hidden (for power-save guard)
 
         async function autoSaveShiftOnClose() {
             // Skip if: no active shift, already fired, tester mode, or logout already running
@@ -2509,16 +2510,40 @@
 
         // --- Layer 1: visibilitychange ---
         // Fires when tab is hidden (switch tab, minimize, screen off on mobile).
-        // We update the activeSessions entry here so other admins see latest figures
-        // even if the operator hasn't formally logged out. We do NOT push to
-        // shiftHistory here because the session is still technically live.
-        document.addEventListener('visibilitychange', () => {
+        // On HIDDEN: keep activeSessions current. Do NOT push shiftHistory — session is still live.
+        // On VISIBLE after power-save: if autoSave fired (screen-off tricked pagehide), silently
+        //   re-open the shift from localStorage so the operator does NOT need to log in again.
+        //   We do NOT write back to Firebase in this re-open path — the shift data is already
+        //   safe in shiftHistory from the autoSave; we only restore UI state.
+        document.addEventListener('visibilitychange', async () => {
             if (document.visibilityState === 'hidden') {
+                pageHiddenAt = Date.now();
                 if (!currentShift || !currentShift.active || isTester) return;
                 // Keep activeSessions current with latest shift figures
                 try {
                     db.ref('/activeSessions/' + currentShift.username).set(currentShift);
                 } catch(e) {}
+            } else if (document.visibilityState === 'visible') {
+                // Screen woke up. If autoSaveFired was set (power-save triggered pagehide),
+                // silently restore the shift from localStorage — NO Firebase write, just UI.
+                // This prevents the operator from seeing the login screen after screen-off.
+                if (autoSaveFired && (!currentShift || !currentShift.active)) {
+                    const saved = localStorage.getItem('parkingShiftSession');
+                    if (saved) {
+                        try {
+                            const parsed = JSON.parse(saved);
+                            if (parsed && parsed.active) {
+                                currentShift = parsed;
+                                autoSaveFired = false; // reset so next real close works
+                                isTester = parsed.role === 'tester';
+                                // Refresh UI without touching Firebase
+                                if (typeof updateDashboardDisplay === 'function') updateDashboardDisplay();
+                                if (typeof renderSpots === 'function') renderSpots();
+                                console.log('Power-save wake: session silently restored from localStorage.');
+                            }
+                        } catch(e) {}
+                    }
+                }
             }
         });
 
@@ -2528,9 +2553,15 @@
         // persisted=false means the page is being truly destroyed (not cached).
         window.addEventListener('pagehide', (e) => {
             if (!e.persisted) {
+                // Guard: if page only went hidden very briefly (< 8s), it's likely a
+                // power-save screen-off, not a real close. Skip autoSave so the operator
+                // doesn't have to re-login on wake. The session stays live in activeSessions.
+                const hiddenDuration = pageHiddenAt ? (Date.now() - pageHiddenAt) : 9999;
+                if (hiddenDuration < 8000) {
+                    console.log('pagehide: short hide (' + hiddenDuration + 'ms) — skipping autoSave (power-save guard).');
+                    return;
+                }
                 // Page is being unloaded for real — trigger full auto-save.
-                // autoSaveShiftOnClose() is async but the Firebase SDK queues
-                // the writes before the connection drops.
                 autoSaveShiftOnClose();
             }
         });
