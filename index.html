@@ -1752,8 +1752,8 @@
                 let blocks = Math.max(1, Math.ceil(elapsedSeconds / (24 * 3600)));
                 rawFee = segmentRate * blocks;
             } else if (currentActiveSpot.type === "3") {
-                // Bike/Scooter: 24hr blocks (changed from 12hr — ₹20 per 24hrs)
-                let blocks = Math.max(1, Math.ceil(elapsedSeconds / (24 * 3600)));
+                // Bike/Scooter: 12hr blocks — ₹20 per 12hrs
+                let blocks = Math.max(1, Math.ceil(elapsedSeconds / (12 * 3600)));
                 rawFee = segmentRate * blocks;
             } else { 
                 // Auto, Car: 12hr blocks
