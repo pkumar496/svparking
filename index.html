@@ -2461,157 +2461,72 @@
         }, 30000);
 
         // ============================================================
-        //  AUTO-SAVE ON BROWSER CLOSE / TAB SWITCH / MOBILE BACKGROUND
-        //  
-        //  Problem: When an operator closes the browser without using the
-        //  "Logout & Save" button, their completed shift data stays only in
-        //  localStorage. On next open, restoreSessionFromLocalStorage() sees
-        //  the stale session still in activeSessions on Firebase and restores
-        //  it. When they THEN logout properly, the shift gets pushed to
-        //  shiftHistory again — doubling (or triple-counting) all revenue.
+        //  SESSION KEEP-ALIVE STRATEGY
         //
-        //  Fix: On every page-hide / visibility-hidden / beforeunload event
-        //  we immediately commit the current shift to /shiftHistory and remove
-        //  it from /activeSessions. This mirrors exactly what executeSecureLogout()
-        //  does, but runs silently using the Firebase SDK's keepSynced + a
-        //  synchronous-safe queued write so it survives the brief teardown window.
+        //  Core principle: NEVER push to shiftHistory or clear activeSessions
+        //  on power-save / screen-off events. Only executeSecureLogout() does that.
         //
-        //  If the user refreshes (not a true close), restoreSessionFromLocalStorage()
-        //  will no longer find the session in /activeSessions, so it correctly
-        //  discards the stale localStorage copy and the user must log in again.
-        //  This is acceptable — it mirrors a normal shift-end flow.
+        //  On screen-off (visibilitychange hidden):
+        //    → just ping activeSessions with latest figures (keep-alive).
+        //    → do nothing else. No timer. No autoSave.
+        //
+        //  On real browser kill (pagehide persisted=false / beforeunload):
+        //    → push a safety copy to shiftHistory (autoSaved:true).
+        //    → keep activeSessions INTACT so next open restores the session.
+        //    → keep localStorage INTACT.
+        //    → executeSecureLogout() dedupes shiftHistory on real logout.
         // ============================================================
 
-        // Track whether we already fired the auto-save so duplicate events
-        // (pagehide fires after visibilitychange on mobile) don't double-push.
         let autoSaveFired = false;
-        let pageHiddenAt = null; // timestamp when page went hidden (for power-save guard)
 
         async function autoSaveShiftOnClose() {
-            // Skip if: no active shift, already fired, tester mode, or logout already running
             if (autoSaveFired) return;
             if (!currentShift || !currentShift.active) return;
             if (isTester) return;
             if (logoutInProgress) return;
-
             autoSaveFired = true;
 
-            const finalName     = currentShift.name     || "Operator";
-            const finalHandled  = currentShift.handled  || 0;
-            const c             = parseFloat(currentShift.cash      || 0);
-            const o             = parseFloat(currentShift.online    || 0);
-            const p             = parseFloat(currentShift.passUsage || 0);
-            const usernameKey   = currentShift.username;
-            const hasActivity   = finalHandled > 0 || c > 0 || o > 0 || p > 0;
-
-            // ── IMPORTANT: Do NOT remove activeSessions or clearLocalSession here. ──
-            // autoSaveShiftOnClose fires on both real browser-close AND power-save screen-off.
-            // We cannot reliably distinguish them at fire time.
-            // Strategy:
-            //   • Keep activeSessions intact → restoreSessionFromLocalStorage() will
-            //     restore the shift seamlessly on next page open (power-save wake or refresh).
-            //   • Keep localStorage intact → same reason.
-            //   • Push to shiftHistory only if there's real activity, flagged autoSaved:true.
-            //     executeSecureLogout() checks wasAutoSaved to avoid double-push on real logout.
-            //   • activeSessions cleanup is ONLY done by executeSecureLogout() on real logout.
+            const c = parseFloat(currentShift.cash || 0);
+            const o = parseFloat(currentShift.online || 0);
+            const p = parseFloat(currentShift.passUsage || 0);
+            const hasActivity = (currentShift.handled || 0) > 0 || c > 0 || o > 0 || p > 0;
 
             if (hasActivity) {
-                const autoShift = {
-                    name:       finalName,
-                    username:   usernameKey || "",
-                    loginTime:  currentShift.loginTime || Date.now(),
-                    logoutTime: Date.now(),
-                    handled:    finalHandled,
-                    leftInLot:  (() => {
-                        try {
-                            const sa = Array.isArray(spots) ? spots : Object.values(spots || {});
-                            return sa.filter(s => s && s.isOccupied).length;
-                        } catch(e) { return 0; }
-                    })(),
-                    cash:       c,
-                    online:     o,
-                    passUsage:  p,
-                    autoSaved:  true
-                };
                 try {
-                    await db.ref('/shiftHistory').push(autoShift);
-                } catch(e) {
-                    console.warn('autoSave: shiftHistory push failed', e);
-                }
+                    await db.ref('/shiftHistory').push({
+                        name: currentShift.name || 'Operator',
+                        username: currentShift.username || '',
+                        loginTime: currentShift.loginTime || Date.now(),
+                        logoutTime: Date.now(),
+                        handled: currentShift.handled || 0,
+                        leftInLot: (() => { try { return (Array.isArray(spots) ? spots : Object.values(spots||{})).filter(s=>s&&s.isOccupied).length; } catch(e){return 0;} })(),
+                        cash: c, online: o, passUsage: p,
+                        autoSaved: true
+                    });
+                } catch(e) { console.warn('autoSave shiftHistory push failed', e); }
             }
 
-            // Update activeSessions with latest figures (keep it alive)
-            try {
-                await db.ref('/activeSessions/' + usernameKey).set(currentShift);
-            } catch(e) {
-                console.warn('autoSave: activeSessions update failed', e);
-            }
-
-            // localStorage stays intact — restore will work on next open.
+            // Keep activeSessions alive — session restores on next open.
+            try { await db.ref('/activeSessions/' + currentShift.username).set(currentShift); } catch(e) {}
+            // localStorage stays intact intentionally.
         }
 
-        // ============================================================
-        //  AUTO-SAVE STRATEGY (revised for power-save safety)
-        //
-        //  Problem with old approach: on Android/iOS, power-save / screen-off
-        //  fires pagehide with persisted=false (same as a real close), causing
-        //  autoSaveShiftOnClose() to push to shiftHistory and remove activeSessions.
-        //  On wake, restoreSessionFromLocalStorage() finds no activeSessions entry
-        //  and forces re-login. The operator's currentShift is then blank → revenue ₹0.
-        //
-        //  New approach:
-        //  - visibilitychange hidden → start a 30-second timer. Keep activeSessions
-        //    updated but do NOT push shiftHistory yet.
-        //  - visibilitychange visible (screen wake) → cancel the timer. Session stays.
-        //  - If the 30-second timer fires without a visible event → assume real close
-        //    or long background kill → run autoSaveShiftOnClose().
-        //  - pagehide (persisted=false) → only runs autoSave if the page was hidden
-        //    for > 30 seconds (i.e. the timer already fired). Prevents double-push.
-        //  - beforeunload (desktop) → fires autoSave if not already done.
-        // ============================================================
-
-        let autoSaveTimer = null; // Timer ID for delayed auto-save on hide
-
-        // --- Layer 1: visibilitychange ---
+        // visibilitychange: keep-alive ping ONLY — no autoSave on screen-off
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
-                pageHiddenAt = Date.now();
                 if (!currentShift || !currentShift.active || isTester) return;
-                // Keep activeSessions current so admin sees latest figures
                 try { db.ref('/activeSessions/' + currentShift.username).set(currentShift); } catch(e) {}
-                // Start delayed auto-save — will be cancelled if screen wakes within 30s
-                clearTimeout(autoSaveTimer);
-                autoSaveTimer = setTimeout(() => {
-                    autoSaveShiftOnClose();
-                }, 30000); // 30 seconds — real background kills take longer than power-save
-            } else if (document.visibilityState === 'visible') {
-                // Screen woke up or user returned to tab — cancel pending auto-save
-                clearTimeout(autoSaveTimer);
-                autoSaveTimer = null;
-                pageHiddenAt = null;
             }
         });
 
-        // --- Layer 2: pagehide ---
-        // Fires on mobile when tab/app is killed. Only trigger autoSave if the
-        // 30s timer already fired (autoSaveFired=true) — otherwise let the timer handle it.
-        // If persisted=true the page is in bfcache — do nothing.
+        // pagehide: real tab/app kill on mobile
         window.addEventListener('pagehide', (e) => {
-            if (!e.persisted) {
-                clearTimeout(autoSaveTimer); // cancel timer — we're handling it now
-                if (!autoSaveFired) {
-                    autoSaveShiftOnClose();
-                }
-            }
+            if (!e.persisted && !autoSaveFired) autoSaveShiftOnClose();
         });
 
-        // --- Layer 3: beforeunload ---
-        // Desktop browser close/refresh fallback.
+        // beforeunload: desktop fallback
         window.addEventListener('beforeunload', () => {
-            clearTimeout(autoSaveTimer);
-            if (!autoSaveFired) {
-                autoSaveShiftOnClose();
-            }
+            if (!autoSaveFired) autoSaveShiftOnClose();
         });
 
     </script>
