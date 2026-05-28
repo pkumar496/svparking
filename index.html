@@ -381,18 +381,13 @@
             <h2 id="checkin-title">స్పాట్ నంబర్ #--</h2>
             
             <div class="form-group">
-                <label>ఫోన్ నంబర్</label>
-                <input type="tel" id="input-phone" placeholder="10 అంకెల నంబర్" maxlength="15" onblur="autoSaveToCustomerDB()">
+                <label>బండి నంబర్</label>
+                <input type="text" id="input-plate" placeholder="ప్లేట్ నంబర్" oninput="this.value = this.value.toUpperCase()" >
             </div>
 
             <div class="form-group">
-                <label>బండి నంబర్</label>
-                <div style="display:flex; gap:10px;">
-                    <input type="text" id="input-plate" style="flex:1;" placeholder="ప్లేట్ నంబర్" oninput="this.value = this.value.toUpperCase()" onblur="autoSaveToCustomerDB()">
-                    <button class="btn btn-blue" style="margin-top:0; width:auto; padding: 10px;" onclick="document.getElementById('camera-input').click()">📷 స్కాన్</button>
-                </div>
-                <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none;" onchange="processPlateImage(event)">
-                <div id="ocr-status" style="font-size:12px; font-weight:bold; color:var(--accent-color); margin-top:5px; display:none; text-align:center;">స్కానింగ్ జరుగుతోంది... దయచేసి వేచి ఉండండి ⏳</div>
+                <label>ఫోన్ నంబర్</label>
+                <input type="tel" id="input-phone" placeholder="10 అంకెల నంబర్" maxlength="15" >
             </div>
 
             <div class="form-group"><label>వాహనం రకం</label>
@@ -411,7 +406,6 @@
                 </label>
             </div>
             
-            <button class="btn btn-whatsapp" onclick="submitCheckin('whatsapp_print')">చెక్-ఇన్, వాట్సాప్ & ప్రింట్ 💬🖨️</button>
             <button class="btn btn-blue" onclick="submitCheckin('print_only')">చెక్-ఇన్ & ప్రింట్ 🖨️</button>
             
             <button class="btn btn-gray" onclick="closeModals()">రద్దు చేయి</button>
@@ -839,7 +833,7 @@
                 return;
             }
             const text = encodeURIComponent(messageText);
-            window.location.href = 'whatsapp://send?phone=' + cleanPhone + '&text=' + text;
+            window.open('https://wa.me/91' + cleanPhone + '?text=' + text, '_blank');
             if (typeof afterCallback === 'function') {
                 setTimeout(afterCallback, 2500);
             }
@@ -870,7 +864,7 @@
             if (cleanPhone.length === 10) { cleanPhone = '91' + cleanPhone; }
 
             showToast('WhatsApp తెరుచుకుంటోంది... 2.5 సెకన్ల తర్వాత ప్రింట్ మొదలవుతుంది.');
-            window.location.href = 'whatsapp://send?phone=' + cleanPhone + '&text=' + encodeURIComponent(msg);
+            window.open('https://wa.me/91' + cleanPhone + '?text=' + encodeURIComponent(msg), '_blank');
             setTimeout(() => { printShiftSummary(); }, 2500);
         }
 
@@ -1016,21 +1010,22 @@
             const typeEl = document.getElementById('input-type');
             const vehicleType = typeEl ? typeEl.value : null;
 
-            // Normalize to 10-digit key (strip leading country code 91 if present)
             const normPhone = phone.length === 12 && phone.startsWith('91') ? phone.slice(2) : phone;
             if (normPhone.length >= 10 || safePlate) {
-                let id = (normPhone.length >= 10) ? normPhone : safePlate;
+                const id = (normPhone.length >= 10) ? normPhone : safePlate;
                 if (!customerDB) customerDB = {};
                 const existing = customerDB[id] || {};
-                // Capture the slot number from currentActiveSpot if available
-                const slotNo = (typeof currentActiveSpot !== 'undefined' && currentActiveSpot && currentActiveSpot.id)
-                    ? currentActiveSpot.id : (existing.slotNo || null);
+
+                // Use entryTime from spot — this function is called AFTER entryTime is set in submitCheckin
+                const slotNo = (currentActiveSpot && currentActiveSpot.id) ? currentActiveSpot.id : (existing.slotNo || null);
+                const checkInTime = (currentActiveSpot && currentActiveSpot.entryTime) ? currentActiveSpot.entryTime : (existing.checkIn || Date.now());
+
                 customerDB[id] = {
-                    plate: plate || existing.plate || "--",
+                    plate:       plate || existing.plate || '--',
                     vehicleType: vehicleType || existing.vehicleType || null,
-                    slotNo: slotNo,
-                    checkIn: existing.checkIn || Date.now(),
-                    checkOut: existing.checkOut || null
+                    slotNo:      slotNo,
+                    checkIn:     checkInTime,
+                    checkOut:    existing.checkOut || null
                 };
                 if (!isTester) {
                     firebase.database().ref('/customerDB/' + id).set(customerDB[id]).catch(e => console.error(e));
@@ -1238,7 +1233,7 @@
                 document.getElementById('input-phone').value = '';
                 document.getElementById('input-has-pass').checked = false;
                 document.getElementById('checkin-modal').style.display = 'flex';
-                setTimeout(() => document.getElementById('input-phone').focus(), 50);
+                setTimeout(() => document.getElementById('input-plate').focus(), 50);
             } else {
                 document.getElementById('checkout-title').innerText = `స్పాట్ #${currentActiveSpot.id} వివరాలు`;
                 document.getElementById('info-phone').innerText = currentActiveSpot.phone || "--";
